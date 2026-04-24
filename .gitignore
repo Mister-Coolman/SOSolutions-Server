@@ -1,0 +1,5 @@
+.env
+node_modules
+tmp_audio
+tmp-tts
+.DS_Store
