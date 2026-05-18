@@ -148,7 +148,7 @@ async function createDeepgramConnection({ sessionId, role, callSid }) {
     channels: 1,
     smart_format: true,
     interim_results: true,
-    endpointing: 700,
+    endpointing: 1500,
     utterances: true,
   });
 
@@ -700,7 +700,7 @@ app.post('/speak', async (req, res) => {
     fs.writeFileSync(filePath, audioBuffer);
     scheduleTtsFileDelete(filePath);
 
-    const announceUrl = `${PUBLIC_BASE_URL}/tts/${encodeURIComponent(fileName)}`;
+    const announceUrl = `${PUBLIC_BASE_URL}/tts-twiml/${encodeURIComponent(fileName)}`;
 
     const targetCallSids = [];
     if (target === 'callee' || target === 'both') {
@@ -772,6 +772,7 @@ app.get('/tts-twiml/:file', (req, res) => {
   const url = `${PUBLIC_BASE_URL}/tts/${encodeURIComponent(fileName)}`;
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Pause length="1"/>
   <Play>${escapeXml(url)}</Play>
 </Response>`;
   res.type('text/xml').send(xml);
