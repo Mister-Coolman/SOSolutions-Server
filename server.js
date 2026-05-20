@@ -631,7 +631,7 @@ app.post('/conference-events', (req, res) => {
     }
 
     if (
-      StatusCallbackEvent === 'join' &&
+      StatusCallbackEvent === 'participant-join' &&
       ParticipantLabel === session.calleeParticipantLabel &&
       !session.introPlayed
     ) {
@@ -841,7 +841,7 @@ app.get('/tts-twiml/:file', (req, res) => {
   const url = `${PUBLIC_BASE_URL}/tts/${encodeURIComponent(fileName)}`;
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Pause length="1"/>
+  <Pause length="1.5"/>
   <Play>${escapeXml(url)}</Play>
 </Response>`;
   res.type('text/xml').send(xml);
