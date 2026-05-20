@@ -85,6 +85,9 @@ function getOrCreateSession(sessionId) {
       appWs: null,
       streams: {},
       lastActivityAt: Date.now(),
+      callerNumber: null,
+      callerLocation: null,
+      introPlayed: false,
     };
   }
   sessions[sessionId].lastActivityAt = Date.now();
@@ -455,7 +458,9 @@ app.post('/start-session', async (req, res) => {
       });
   
       session.calleeCallSid = calleeCall.sid;
-  
+      session.callerNumber = req.body.callerNumber || null;
+      session.callerLocation = req.body.location || null;
+
       res.json({
         ok: true,
         sessionId,
@@ -547,6 +552,59 @@ app.post('/twiml/callee-join', (req, res) => {
   res.type('text/xml').send(twiml.toString());
 });
 
+// -------------------- Intro message --------------------
+
+async function playIntroMessage(session) {
+  if (!session.conferenceSid || !session.calleeCallSid) return;
+
+  const parts = [
+    'This call is from a hearing-impaired person using the SOSolutions app.',
+  ];
+  if (session.callerNumber) {
+    parts.push(`Their callback number is ${session.callerNumber}.`);
+  }
+  if (session.callerLocation) {
+    parts.push(`They are located at ${session.callerLocation}.`);
+  }
+  parts.push('Please do not hang up.');
+
+  const text = parts.join(' ');
+
+  const elevenRes = await fetch(
+    'https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb',
+    {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json',
+        Accept: 'audio/mpeg',
+      },
+      body: JSON.stringify({ text, model_id: 'eleven_multilingual_v2' }),
+    }
+  );
+
+  if (!elevenRes.ok) {
+    throw new Error(`ElevenLabs error ${elevenRes.status}: ${await elevenRes.text()}`);
+  }
+
+  const audioBuffer = Buffer.from(await elevenRes.arrayBuffer());
+  if (!audioBuffer.length) throw new Error('ElevenLabs returned empty audio');
+
+  const fileName = `${crypto.randomUUID()}.mp3`;
+  const filePath = path.join(ttsDir, fileName);
+  fs.writeFileSync(filePath, audioBuffer);
+  scheduleTtsFileDelete(filePath);
+
+  const announceUrl = `${PUBLIC_BASE_URL}/tts-twiml/${encodeURIComponent(fileName)}`;
+
+  await client
+    .conferences(session.conferenceSid)
+    .participants(session.calleeCallSid)
+    .update({ announceUrl, announceMethod: 'GET' });
+
+  console.log(`Intro message played for session ${session.sessionId}`);
+}
+
 // -------------------- Status callbacks --------------------
 
 app.post('/conference-events', (req, res) => {
@@ -570,6 +628,17 @@ app.post('/conference-events', (req, res) => {
     }
     if (ParticipantLabel === session.calleeParticipantLabel) {
       session.calleeCallSid = CallSid || session.calleeCallSid;
+    }
+
+    if (
+      StatusCallbackEvent === 'join' &&
+      ParticipantLabel === session.calleeParticipantLabel &&
+      !session.introPlayed
+    ) {
+      session.introPlayed = true;
+      playIntroMessage(session).catch(err =>
+        console.error('playIntroMessage error:', err.message)
+      );
     }
 
     notifyApp(session, {
