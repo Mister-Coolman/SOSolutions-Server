@@ -88,6 +88,8 @@ function getOrCreateSession(sessionId) {
       callerNumber: null,
       callerLocation: null,
       introPlayed: false,
+      ttsQueue: [],
+      announcementPlaying: false,
     };
   }
   sessions[sessionId].lastActivityAt = Date.now();
@@ -552,6 +554,52 @@ app.post('/twiml/callee-join', (req, res) => {
   res.type('text/xml').send(twiml.toString());
 });
 
+// -------------------- TTS queue --------------------
+/*
+ * Each queue item: { announceUrl, targetCallSids, text, target }
+ * Audio is generated eagerly (before enqueue) so there's no delay when dequeued.
+ * drainTtsQueue fires the next item only when the previous announcement finishes
+ * (Twilio sends the 'announcement' conference event on completion).
+ */
+
+async function drainTtsQueue(session) {
+  if (session.announcementPlaying || session.ttsQueue.length === 0) return;
+  if (!session.conferenceSid) return;
+
+  const item = session.ttsQueue.shift();
+  session.announcementPlaying = true;
+
+  notifyApp(session, {
+    type: 'speaking',
+    state: 'start',
+    sessionId: session.sessionId,
+    target: item.target || 'callee',
+    text: item.text || '',
+    ts: nowIso(),
+  });
+
+  try {
+    for (const callSid of item.targetCallSids) {
+      await client
+        .conferences(session.conferenceSid)
+        .participants(callSid)
+        .update({ announceUrl: item.announceUrl, announceMethod: 'GET' });
+    }
+    console.log(`TTS playing for session ${session.sessionId}: "${(item.text || '').slice(0, 60)}"`);
+  } catch (err) {
+    console.error('drainTtsQueue announce error:', err.message);
+    session.announcementPlaying = false;
+    // Skip failed item and try the next one
+    drainTtsQueue(session).catch(e => console.error('drainTtsQueue retry error:', e.message));
+  }
+}
+
+async function enqueueTts(session, item) {
+  session.ttsQueue.push(item);
+  console.log(`TTS enqueued for session ${session.sessionId} (queue depth: ${session.ttsQueue.length}, playing: ${session.announcementPlaying})`);
+  await drainTtsQueue(session);
+}
+
 // -------------------- Intro message --------------------
 
 async function playIntroMessage(session) {
@@ -597,12 +645,14 @@ async function playIntroMessage(session) {
 
   const announceUrl = `${PUBLIC_BASE_URL}/tts-twiml/${encodeURIComponent(fileName)}`;
 
-  await client
-    .conferences(session.conferenceSid)
-    .participants(session.calleeCallSid)
-    .update({ announceUrl, announceMethod: 'GET' });
+  await enqueueTts(session, {
+    announceUrl,
+    targetCallSids: [session.calleeCallSid],
+    text,
+    target: 'callee',
+  });
 
-  console.log(`Intro message played for session ${session.sessionId}`);
+  console.log(`Intro message enqueued for session ${session.sessionId}`);
 }
 
 // -------------------- Status callbacks --------------------
@@ -639,6 +689,23 @@ app.post('/conference-events', (req, res) => {
       playIntroMessage(session).catch(err =>
         console.error('playIntroMessage error:', err.message)
       );
+    }
+
+    // Twilio fires 'announcement' when audio finishes playing — advance queue or clear indicator
+    if (StatusCallbackEvent === 'announcement') {
+      session.announcementPlaying = false;
+      if (session.ttsQueue.length > 0) {
+        drainTtsQueue(session).catch(err =>
+          console.error('drainTtsQueue (announcement) error:', err.message)
+        );
+      } else {
+        notifyApp(session, {
+          type: 'speaking',
+          state: 'stop',
+          sessionId,
+          ts: nowIso(),
+        });
+      }
     }
 
     notifyApp(session, {
@@ -728,15 +795,6 @@ app.post('/speak', async (req, res) => {
   }
 
   try {
-    notifyApp(session, {
-      type: 'speaking',
-      state: 'start',
-      sessionId,
-      target,
-      text,
-      ts: nowIso(),
-    });
-
     const elevenRes = await fetch(
       'https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb',
       {
@@ -783,24 +841,11 @@ app.post('/speak', async (req, res) => {
       return res.status(404).json({ error: 'No target participant is currently connected' });
     }
 
-    for (const participantCallSid of targetCallSids) {
-      await client
-        .conferences(session.conferenceSid)
-        .participants(participantCallSid)
-        .update({
-          announceUrl,
-          announceMethod: 'GET',
-        });
-    }
-
-    notifyApp(session, {
-      type: 'speaking',
-      state: 'queued',
-      sessionId,
-      target,
+    await enqueueTts(session, {
       announceUrl,
-      targets: targetCallSids,
-      ts: nowIso(),
+      targetCallSids,
+      text,
+      target,
     });
 
     res.json({
@@ -809,6 +854,7 @@ app.post('/speak', async (req, res) => {
       target,
       targets: targetCallSids,
       announceUrl,
+      queued: session.announcementPlaying,
     });
   } catch (err) {
     console.error('speak error:', err);
