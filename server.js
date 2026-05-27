@@ -505,7 +505,7 @@ app.post('/twiml/app-join', (req, res) => {
         waitUrl: '',
         statusCallback: `${PUBLIC_BASE_URL}/conference-events`,
         statusCallbackMethod: 'POST',
-        statusCallbackEvent: 'start end join leave mute hold modify speaker announcement',
+        statusCallbackEvent: 'start end join leave mute hold modify speaker announcement announcement-end',
       },
       session.roomName
     );
@@ -544,7 +544,7 @@ app.post('/twiml/callee-join', (req, res) => {
       beep: false,
       statusCallback: `${PUBLIC_BASE_URL}/conference-events`,
       statusCallbackMethod: 'POST',
-      statusCallbackEvent: 'join leave mute hold modify speaker announcement',
+      statusCallbackEvent: 'join leave mute hold modify speaker announcement announcement-end',
     },
     session.roomName
   );
@@ -583,7 +583,7 @@ async function drainTtsQueue(session) {
   // Estimate: ~60 words/min ElevenLabs speech + 1.5s pause + 5s buffer = ~90s max.
   // Use item text length to scale: ~150ms per word, minimum 20s.
   const wordCount = (item.text || '').split(/\s+/).length;
-  const fallbackMs = Math.max(20000, wordCount * 150 + 7000);
+  const fallbackMs = Math.max(45000, wordCount * 150 + 7000);
   const fallbackTimer = setTimeout(() => {
     if (session.announcementPlaying) {
       console.warn(`[TTS] Session ${session.sessionId}: 'announcement' event never arrived after ${fallbackMs}ms — unblocking queue`);
@@ -710,9 +710,9 @@ app.post('/conference-events', (req, res) => {
       );
     }
 
-    // Twilio fires 'announcement' when audio finishes playing — advance queue or clear indicator
-    if (StatusCallbackEvent === 'announcement') {
-      console.log(`[TTS] 'announcement' event received for session ${sessionId} — unblocking queue (depth: ${session.ttsQueue.length})`);
+    // Twilio fires 'announcement-end' when audio finishes playing — advance queue or clear indicator
+    if (StatusCallbackEvent === 'announcement-end') {
+      console.log(`[TTS] 'announcement-end' event received for session ${sessionId} — unblocking queue (depth: ${session.ttsQueue.length})`);
       session.announcementPlaying = false;
       if (session.ttsQueue.length > 0) {
         drainTtsQueue(session).catch(err =>
