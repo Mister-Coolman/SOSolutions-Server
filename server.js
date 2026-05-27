@@ -578,6 +578,24 @@ async function drainTtsQueue(session) {
     ts: nowIso(),
   });
 
+  // Fallback: if the 'announcement' conference event never arrives (Twilio doesn't
+  // guarantee it in all configurations), unblock the queue after a generous timeout.
+  // Estimate: ~60 words/min ElevenLabs speech + 1.5s pause + 5s buffer = ~90s max.
+  // Use item text length to scale: ~150ms per word, minimum 20s.
+  const wordCount = (item.text || '').split(/\s+/).length;
+  const fallbackMs = Math.max(20000, wordCount * 150 + 7000);
+  const fallbackTimer = setTimeout(() => {
+    if (session.announcementPlaying) {
+      console.warn(`[TTS] Session ${session.sessionId}: 'announcement' event never arrived after ${fallbackMs}ms — unblocking queue`);
+      session.announcementPlaying = false;
+      if (session.ttsQueue.length > 0) {
+        drainTtsQueue(session).catch(e => console.error('drainTtsQueue fallback retry:', e.message));
+      } else {
+        notifyApp(session, { type: 'speaking', state: 'stop', sessionId: session.sessionId, ts: nowIso() });
+      }
+    }
+  }, fallbackMs);
+
   try {
     for (const callSid of item.targetCallSids) {
       await client
@@ -585,8 +603,9 @@ async function drainTtsQueue(session) {
         .participants(callSid)
         .update({ announceUrl: item.announceUrl, announceMethod: 'GET' });
     }
-    console.log(`TTS playing for session ${session.sessionId}: "${(item.text || '').slice(0, 60)}"`);
+    console.log(`[TTS] Playing for session ${session.sessionId} (fallback in ${fallbackMs}ms): "${(item.text || '').slice(0, 60)}"`);
   } catch (err) {
+    clearTimeout(fallbackTimer);
     console.error('drainTtsQueue announce error:', err.message);
     session.announcementPlaying = false;
     // Skip failed item and try the next one
@@ -693,6 +712,7 @@ app.post('/conference-events', (req, res) => {
 
     // Twilio fires 'announcement' when audio finishes playing — advance queue or clear indicator
     if (StatusCallbackEvent === 'announcement') {
+      console.log(`[TTS] 'announcement' event received for session ${sessionId} — unblocking queue (depth: ${session.ttsQueue.length})`);
       session.announcementPlaying = false;
       if (session.ttsQueue.length > 0) {
         drainTtsQueue(session).catch(err =>
@@ -719,7 +739,7 @@ app.post('/conference-events', (req, res) => {
     });
   }
 
-  console.log('Conference event:', req.body);
+  console.log(`[conf-event] ${StatusCallbackEvent} | room=${FriendlyName} | label=${ParticipantLabel} | callSid=${CallSid}`);
   res.sendStatus(200);
 });
 
