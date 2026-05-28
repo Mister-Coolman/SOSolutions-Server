@@ -816,7 +816,7 @@ app.post('/speak', async (req, res) => {
 
   try {
     const elevenRes = await fetch(
-      'https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb',
+      'https://api.elevenlabs.io/v1/text-to-speech/7EzWGsX10sAS4c9m9cPf',
       {
         method: 'POST',
         headers: {
