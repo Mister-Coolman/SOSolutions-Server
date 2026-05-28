@@ -914,12 +914,91 @@ app.get('/tts-twiml/:file', (req, res) => {
 });
 
 // -------------------- Fireworks passthrough --------------------
+/*
+ * Proxies chat completions to Fireworks. Two layers of reasoning suppression:
+ *   1. Strip any reasoning-related fields from the *request* body before
+ *      forwarding (Fireworks rejects unknown reasoning_* params with HTTP 400
+ *      on Kimi models, so we drop them server-side instead of trusting the
+ *      client to omit them).
+ *   2. Sanitize the *response* by removing reasoning_content / thinking traces
+ *      so the client only ever sees the final answer in `content`.
+ *
+ * Reference: https://docs.fireworks.ai/getting-started/quickstart
+ * On Kimi K2.6 specifically, reasoning_effort / enable_thinking parameters
+ * trigger 400 errors; the cleanest path is to omit them entirely.
+ */
+
+// Field names known to trigger or carry reasoning output across model families
+const REASONING_REQUEST_FIELDS = [
+  'reasoning_effort',   // Fireworks SDK / OpenAI-compatible models
+  'reasoning',          // generic
+  'thinking',           // Anthropic-compatible models
+  'enable_thinking',    // Qwen3 family
+  'include_reasoning',  // some OSS forks
+];
+
+const REASONING_RESPONSE_FIELDS = [
+  'reasoning_content',  // Kimi, Qwen3 — chain-of-thought trace
+  'reasoning',          // OpenAI o-series style
+  'thinking',           // Anthropic-style thinking blocks
+];
+
+function stripReasoningFromRequest(body) {
+  if (!body || typeof body !== 'object') return body;
+  const cleaned = { ...body };
+  for (const field of REASONING_REQUEST_FIELDS) {
+    delete cleaned[field];
+  }
+  // Some clients nest these under extra_body
+  if (cleaned.extra_body && typeof cleaned.extra_body === 'object') {
+    cleaned.extra_body = { ...cleaned.extra_body };
+    for (const field of REASONING_REQUEST_FIELDS) {
+      delete cleaned.extra_body[field];
+    }
+  }
+  return cleaned;
+}
+
+function stripReasoningFromResponse(data) {
+  if (!data || typeof data !== 'object') return data;
+  if (!Array.isArray(data.choices)) return data;
+
+  data.choices = data.choices.map((choice) => {
+    if (!choice?.message) return choice;
+    const msg = { ...choice.message };
+
+    // If `content` is empty/null but reasoning has the actual answer, promote it.
+    // (Some Qwen3 configurations dump the answer into reasoning_content when
+    // thinking mode silently activates — we'd rather surface that than show
+    // the user nothing.)
+    const hasUsableContent =
+      typeof msg.content === 'string' && msg.content.trim().length > 0;
+
+    if (!hasUsableContent && typeof msg.reasoning_content === 'string') {
+      // Try to extract the final answer from the reasoning trace by taking
+      // the text after the last newline-separated section break.
+      const trace = msg.reasoning_content.trim();
+      msg.content = trace;
+    }
+
+    // Now drop all reasoning fields regardless
+    for (const field of REASONING_RESPONSE_FIELDS) {
+      delete msg[field];
+    }
+
+    return { ...choice, message: msg };
+  });
+
+  return data;
+}
 
 app.post('/fireworks/chat', async (req, res) => {
   try {
+    const cleanedBody = stripReasoningFromRequest(req.body);
+
     const response = await axios.post(
       'https://api.fireworks.ai/inference/v1/chat/completions',
-      req.body,
+      cleanedBody,
       {
         headers: {
           Authorization: `Bearer ${process.env.FIREWORKS_API_KEY}`,
@@ -928,10 +1007,13 @@ app.post('/fireworks/chat', async (req, res) => {
       }
     );
 
-    res.json(response.data);
+    const sanitized = stripReasoningFromResponse(response.data);
+    res.json(sanitized);
   } catch (err) {
-    console.error(err.response?.data || err);
-    res.status(500).json({ error: 'Fireworks request failed' });
+    console.error('Fireworks error:', err.response?.data || err.message);
+    res.status(err.response?.status || 500).json({
+      error: err.response?.data?.error || 'Fireworks request failed',
+    });
   }
 });
 
